@@ -2,7 +2,7 @@
 
 TARGET = VolumeTest
 SRCS = Volume.cxx VolumeTest.cxx
-	
+
 LIBS = -L/usr/local/lib -lgtest
 
 OBJS = $(SRCS:.cxx=.o)
