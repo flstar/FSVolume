@@ -175,34 +175,12 @@ Volume::Volume(const char *path)
 		else {
 			THROW_EXCEPTION(errno, "Failed to stat volume directory %s", path);
 		}
-		fmap_[0UL] = nullptr;
+		getFile(0UL);
 	}
 
 	else if (!S_ISDIR(statbuf.st_mode)) {
 		THROW_EXCEPTION(ENOTDIR, "Volume path %s is NOT a directory", path);
 	}
-
-	// Scan all files
-	DIR *dirp = opendir(path);
-	if (dirp == nullptr) {
-		THROW_EXCEPTION(errno, "Failed to open volume dir %s", path);
-	}
-
-	struct dirent *dire = nullptr;
-	while ((dire = readdir(dirp)) != nullptr) {
-		uint64_t offset;
-		int n = sscanf(dire->d_name, "%06lu.vf", &offset);
-		if (n == 1) {
-			// parse matching files and ignore others
-			offset = offset << FILE_SIZE_SHIFT;
-			fmap_[offset] = nullptr;
-		}
-		errno = 0;
-	}
-	if (errno != 0) {
-		THROW_EXCEPTION(errno, "Failed to scan volume directory %s", path);
-	}
-	closedir(dirp);
 }
 
 Volume::~Volume()
@@ -221,7 +199,7 @@ void Volume::evictFileWithLock()
 			uint64_t offset = *iter;
 			std::shared_ptr<VolumeFile> f = fmap_[offset];
 			if (f.use_count() <= 2) {
-				// Only used by fmap_ and f
+				// Only referred by fmap_ and f
 				fmap_[offset].reset();
 				flist_.remove(offset);
 				f.reset();
@@ -236,48 +214,27 @@ void Volume::evictFileWithLock()
 	return;
 }
 
-std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset, uint64_t *start, uint64_t *end)
+std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset)
 {
 	std::unique_lock<std::mutex> _flck(fmtx_);
 
-	auto riter = fmap_.rbegin();
-	if (offset >= riter->first + FILE_SIZE) {
-		// If offset is beyond the range of last file, create a new file
+	uint64_t start = offset & FILE_START_MASK;
+	auto iter = fmap_.find(start);
+	if (iter == fmap_.end()) {
+		// If choosen file it not opened yet, open it
 		evictFileWithLock();
 		std::string fn = offsetToPathfile(offset);
 		std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
-		flist_.push_back(offset & FILE_START_MASK);
-		fmap_[offset & FILE_START_MASK] = f;
+		flist_.push_back(start);
+		fmap_[start] = f;
 	}
-
-	// search for matching file
-	auto iter = fmap_.upper_bound(offset);
-	-- iter;
-	uint64_t start_offset = iter->first;
-	uint64_t end_offset = start_offset + FILE_SIZE;
-	++ iter;
-	if (iter != fmap_.end()) {
-		end_offset = iter->first;
+	else {
+		// If choosen file has been opened, move it to the end of lru list
+		flist_.remove(start);
+		flist_.push_back(start);
 	}
-	-- iter;
 	
-	// If choosen file it not opened yet, open it
-	if (iter->second == nullptr) {
-		evictFileWithLock();
-		std::string fn = offsetToPathfile(iter->first);
-		std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
-		flist_.push_back(iter->first);
-		fmap_[iter->first] = f;
-	}
-
-	// return
-	if (start != nullptr) {
-		*start = start_offset;
-	}
-	if (end != nullptr) {
-		*end = end_offset;
-	}
-	return fmap_[start_offset];
+	return fmap_[start];
 }
 
 void Volume::pwrite(const void *buff, int32_t len, uint64_t offset)
@@ -285,10 +242,10 @@ void Volume::pwrite(const void *buff, int32_t len, uint64_t offset)
 	std::unique_lock<std::mutex> _wlck(write_mtx_);
 
 	while (len > 0) {
-		uint64_t start = 0UL, end = 0UL;
-		std::shared_ptr<VolumeFile> f = getFile(offset, &start, &end);
+		std::shared_ptr<VolumeFile> f = getFile(offset);
+		uint64_t start = offset & FILE_START_MASK;
 		uint64_t in_offset = offset - start;
-		uint64_t minlen = std::min(end - offset, uint64_t(len));
+		uint64_t minlen = std::min(FILE_SIZE - in_offset, uint64_t(len));
 
 		f->pwrite(buff, int32_t(minlen), in_offset);
 		offset += minlen;
@@ -302,10 +259,10 @@ void Volume::pwrite(const void *buff, int32_t len, uint64_t offset)
 void Volume::pread(void *buff, int32_t len, uint64_t offset)
 {
 	while (len > 0) {
-		uint64_t start = 0UL, end = 0UL;
-		std::shared_ptr<VolumeFile> f = getFile(offset, &start, &end);
+		std::shared_ptr<VolumeFile> f = getFile(offset);
+		uint64_t start = offset & FILE_START_MASK;
 		uint64_t in_offset = offset - start;
-		uint64_t minlen = std::min(end - offset, uint64_t(len));
+		uint64_t minlen = std::min(FILE_SIZE - in_offset, uint64_t(len));
 
 		f->pread(buff, int32_t(minlen), in_offset);
 		offset += minlen;

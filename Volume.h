@@ -39,7 +39,7 @@ class Volume
 
 private:
 	std::string path_;
-	std::mutex write_mtx_;			// serialize all write operations, protect size_ and curr_file_
+	std::mutex write_mtx_;			// serialize all write operations
 	
 	std::mutex fmtx_;
 	std::map<uint64_t, std::shared_ptr<VolumeFile> > fmap_;
@@ -48,7 +48,7 @@ private:
 private:
 	std::string offsetToPathfile(uint64_t offset);
 	void evictFileWithLock();
-	std::shared_ptr<VolumeFile> getFile(uint64_t offset, uint64_t *start, uint64_t *end);
+	std::shared_ptr<VolumeFile> getFile(uint64_t offset);
 
 public:
 	Volume(const char *path);
