@@ -45,7 +45,7 @@ void VolumeFile::seek(uint64_t offset)
 	}
 }
 
-void VolumeFile::flush()
+void VolumeFile::sync()
 {
 	int ret = fsync(fd_);
 	if (ret < 0) {
@@ -143,11 +143,11 @@ void VolumeFile::unlink(const char *fn)
 	return;
 }
 
+size_t Volume::FILE_POOL_SIZE = 256;
 int Volume::FILE_SIZE_SHIFT = 10;							// 1KB for test only
 uint64_t Volume::FILE_SIZE = (1UL << FILE_SIZE_SHIFT);
 uint64_t Volume::FILE_OFFSET_MASK = (FILE_SIZE - 1);
 uint64_t Volume::FILE_START_MASK = ~(FILE_SIZE - 1);
-size_t Volume::FILE_POOL_SIZE = 256;
 
 std::string Volume::offsetToPathfile(uint64_t offset)
 {
@@ -175,7 +175,6 @@ Volume::Volume(const char *path)
 		else {
 			THROW_EXCEPTION(errno, "Failed to stat volume directory %s", path);
 		}
-		getFile(0UL);
 	}
 
 	else if (!S_ISDIR(statbuf.st_mode)) {
@@ -273,12 +272,12 @@ void Volume::pread(void *buff, int32_t len, uint64_t offset)
 	return;
 }
 
-void Volume::flush()
+void Volume::sync()
 {
 	for (auto it = flist_.begin(); it != flist_.end(); it++) {
 		auto mapiter = fmap_.find(*it);
 		std::shared_ptr<VolumeFile> f = mapiter->second;
-		f->flush();
+		f->sync();
 	}
 	return;
 }

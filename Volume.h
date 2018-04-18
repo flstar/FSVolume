@@ -19,7 +19,7 @@ public:
 
 	uint64_t size();
 	uint64_t tell();
-	void flush();
+	void sync();
 	void seek(uint64_t offset);
 	void truncate(uint64_t length);
 	void pread(void *buff, int32_t len, uint64_t offset);
@@ -55,7 +55,7 @@ public:
 	virtual ~Volume();
 
 public:
-	void flush();
+	void sync();
 	void pwrite(const void *buff, int32_t len, uint64_t offset);
 	void pread(void *buff, int32_t len, uint64_t offset);
 };
