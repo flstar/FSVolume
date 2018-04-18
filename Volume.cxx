@@ -12,7 +12,7 @@
 VolumeFile::VolumeFile(const char *fn)
 {
 	fn_ = fn;
-	fd_ = open(fn, O_CREAT|O_RDWR);
+	fd_ = open(fn, O_CREAT|O_RDWR, 0644);
 	if (fd_ < 0) {
 		THROW_EXCEPTION(errno, "Failed to open/create file %s", fn);
 	}
@@ -65,6 +65,7 @@ void VolumeFile::truncate(uint64_t length)
 	if (ret < 0) {
 		THROW_EXCEPTION(errno, "Failed to truncate volume file %s", fn_.c_str());
 	}
+	return;
 }
 
 void VolumeFile::pread(void *buff, int len, uint64_t offset)
@@ -140,11 +141,17 @@ void VolumeFile::unlink(const char *fn)
 	return;
 }
 
-std::string Volume::offsetToFilename(uint64_t offset)
+int Volume::FILE_SIZE_SHIFT = 10;							// 1KB for test only
+uint64_t Volume::FILE_SIZE = (1UL << FILE_SIZE_SHIFT);
+uint64_t Volume::FILE_OFFSET_MASK = (FILE_SIZE - 1);
+uint64_t Volume::FILE_START_MASK = ~(FILE_SIZE - 1);
+size_t Volume::FILE_POOL_SIZE = 256;
+
+std::string Volume::offsetToPathfile(uint64_t offset)
 {
 	char buf[32];
 	sprintf(buf, "%06lu.vf", offset >> FILE_SIZE_SHIFT);
-	return buf;
+	return path_ + "/" + buf;
 }
 
 Volume::Volume(const char *path)
@@ -188,15 +195,17 @@ Volume::Volume(const char *path)
 			offset = offset << FILE_SIZE_SHIFT;
 			fmap_[offset] = nullptr;
 		}
+		errno = 0;
 	}
 	if (errno != 0) {
 		THROW_EXCEPTION(errno, "Failed to scan volume directory %s", path);
 	}
 	closedir(dirp);
 
+	fmap_[0UL] = nullptr;
 	// Open last file as curr_file_
 	auto rit = fmap_.rbegin();
-	std::string fn = path_ + "/" + offsetToFilename(rit->first);
+	std::string fn = offsetToPathfile(rit->first);
 	std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
 
 	flist_.push_back(rit->first);
@@ -221,7 +230,7 @@ void Volume::evictFileLocked()
 			std::shared_ptr<VolumeFile> f = fmap_[offset];
 			if (f.use_count() <= 2) {
 				// Only used by fmap_ and f
-				fmap_.erase(offset);
+				fmap_[offset].reset();
 				flist_.remove(offset);
 				f.reset();
 				++ counter;
@@ -243,7 +252,7 @@ std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset)
 	if (offset - (riter->first) >= FILE_SIZE) {
 		// If offset is beyond current head file, create a new file for it
 		evictFileLocked();
-		std::string fn = offsetToFilename(offset);
+		std::string fn = offsetToPathfile(offset);
 		std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
 		flist_.push_back(offset & FILE_START_MASK);
 		fmap_[offset & FILE_START_MASK] = f;
@@ -251,7 +260,8 @@ std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset)
 	}
 
 	// search for matching file
-	auto iter = fmap_.lower_bound(offset);
+	auto iter = fmap_.upper_bound(offset);
+	-- iter;
 	if (iter->second != nullptr) {
 		// if file has been opened, return it
 		flist_.remove(iter->first);
@@ -261,7 +271,7 @@ std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset)
 
 	// Open the file
 	evictFileLocked();
-	std::string fn = path_ + "/" + offsetToFilename(iter->first);
+	std::string fn = offsetToPathfile(iter->first);
 	std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
 	flist_.push_back(iter->first);
 	fmap_[iter->first] = f;
@@ -282,7 +292,7 @@ void Volume::rotateFile()
 
 	evictFileLocked();
 
-	std::string fn = path_ + "/" + offsetToFilename(size_);
+	std::string fn = offsetToPathfile(size_);
 	std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
 
 	flist_.push_back(size_);
@@ -342,7 +352,7 @@ void Volume::pread(void *buff, int32_t len, uint64_t offset)
 		uint64_t in_offset = offset & FILE_OFFSET_MASK;
 		uint64_t minlen = std::min(FILE_SIZE - in_offset, uint64_t(len));
 
-		f->pread(buff, int32_t(minlen), offset);
+		f->pread(buff, int32_t(minlen), in_offset);
 		offset += minlen;
 		len -= minlen;
 		buff = (char *)buff + minlen;
@@ -371,7 +381,7 @@ void Volume::truncate(uint64_t length)
 	while (size_ > length) {
 		if ((size_ & FILE_START_MASK) != (length & FILE_START_MASK)) {
 			// Different files, delete current file
-			std::string fn = path_ + "/" + offsetToFilename(size_);
+			std::string fn = offsetToPathfile(size_);
 			VolumeFile::unlink(fn.c_str());
 			// Delete possible cached file handler
 			std::unique_lock<std::mutex> _lck2(pool_mtx_);
