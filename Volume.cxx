@@ -37,6 +37,20 @@ uint64_t VolumeFile::size()
 	return statbuf.st_size;
 }
 
+STATIC
+uint64_t VolumeFile::size(const char *fn)
+{
+	struct stat statbuf;
+	memset(&statbuf, 0x00, sizeof(statbuf));
+
+	int ret = stat(fn, &statbuf);
+	if (ret < 0) {
+		THROW_EXCEPTION(errno, "Failed to fstat file %s", fn);
+	}
+
+	return statbuf.st_size;
+}
+
 void VolumeFile::seek(uint64_t offset)
 {
 	off_t new_offset = lseek(fd_, offset, SEEK_SET);
@@ -132,7 +146,6 @@ void VolumeFile::write(const void *buff, int len)
 	}
 }
 
-
 STATIC
 void VolumeFile::unlink(const char *fn)
 {
@@ -143,23 +156,19 @@ void VolumeFile::unlink(const char *fn)
 	return;
 }
 
-size_t Volume::FILE_POOL_SIZE = 256;
-int Volume::FILE_SIZE_SHIFT = 10;							// 1KB for test only
-uint64_t Volume::FILE_SIZE = (1UL << FILE_SIZE_SHIFT);
-uint64_t Volume::FILE_OFFSET_MASK = (FILE_SIZE - 1);
-uint64_t Volume::FILE_START_MASK = ~(FILE_SIZE - 1);
-
-std::string Volume::offsetToPathfile(uint64_t offset)
+Volume::Volume(const char *path, int file_size_shift /* = 30 */, size_t pool_size /* = 256 */)
 {
-	char buf[32];
-	sprintf(buf, "%06lu.vf", offset >> FILE_SIZE_SHIFT);
-	return path_ + "/" + buf;
-}
+	// Set parameters
+	FILE_POOL_SIZE = pool_size;
+	FILE_SIZE_SHIFT = file_size_shift;
+	FILE_SIZE = (1UL << FILE_SIZE_SHIFT);
+	FILE_OFFSET_MASK = (FILE_SIZE - 1);
+	FILE_START_MASK = ~(FILE_SIZE - 1);
 
-Volume::Volume(const char *path)
-{
+	// Save path
 	path_ = path;
-
+	provisioned_length_ = 0UL;
+	
 	struct stat statbuf;
 	memset(&statbuf, 0x00, sizeof(statbuf));
 
@@ -176,14 +185,41 @@ Volume::Volume(const char *path)
 			THROW_EXCEPTION(errno, "Failed to stat volume directory %s", path);
 		}
 	}
-
 	else if (!S_ISDIR(statbuf.st_mode)) {
 		THROW_EXCEPTION(ENOTDIR, "Volume path %s is NOT a directory", path);
 	}
+
+	// Scan all files to get provisioned length
+	DIR *dirp = opendir(path);
+	if (dirp == nullptr) {
+		THROW_EXCEPTION(errno, "Failed to open volume dir %s", path);
+	}
+
+	struct dirent *dire = nullptr;
+	while ((dire = readdir(dirp)) != nullptr) {
+		uint64_t offset;
+		int n = sscanf(dire->d_name, "%06lu.vf", &offset);
+		if (n == 1) {
+			std::string fn = path_ + "/" + dire->d_name;
+			provisioned_length_ = std::max(provisioned_length_, (offset << FILE_SIZE_SHIFT) + VolumeFile::size(fn.c_str()));
+		}
+		errno = 0;
+	}
+	if (errno != 0) {
+		THROW_EXCEPTION(errno, "Failed to scan volume directory %s", path);
+	}
+	closedir(dirp);
 }
 
 Volume::~Volume()
 {
+}
+
+std::string Volume::offsetToPathfile(uint64_t offset)
+{
+	char buf[32];
+	sprintf(buf, "%06lu.vf", offset >> FILE_SIZE_SHIFT);
+	return path_ + "/" + buf;
 }
 
 void Volume::evictFileWithLock()
@@ -232,14 +268,15 @@ std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset)
 		flist_.remove(start);
 		flist_.push_back(start);
 	}
-	
+
 	return fmap_[start];
 }
 
 void Volume::pwrite(const void *buff, int32_t len, uint64_t offset)
 {
 	std::unique_lock<std::mutex> _wlck(write_mtx_);
-
+	provisioned_length_ = std::max(provisioned_length_, offset + len);
+	
 	while (len > 0) {
 		std::shared_ptr<VolumeFile> f = getFile(offset);
 		uint64_t start = offset & FILE_START_MASK;
@@ -251,7 +288,6 @@ void Volume::pwrite(const void *buff, int32_t len, uint64_t offset)
 		len -= minlen;
 		buff = (char *)buff + minlen;
 	}
-	
 	return;
 }
 
@@ -268,7 +304,6 @@ void Volume::pread(void *buff, int32_t len, uint64_t offset)
 		len -= minlen;
 		buff = (char *)buff + minlen;
 	}
-
 	return;
 }
 

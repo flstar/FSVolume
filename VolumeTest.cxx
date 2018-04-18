@@ -62,7 +62,7 @@ TEST(Volume, Rotate)
 	memset(buff+1024, '2', 1024);
 	memset(buff+2*1024, '3', dsize - 2*1024);
 
-	Volume vol(path);
+	Volume vol(path, 10);
 	vol.pwrite(buff, dsize, 0UL);
 	
 	std::unique_ptr<char[]> _buff2(new char[dsize]);
@@ -74,6 +74,30 @@ TEST(Volume, Rotate)
 
 	system(clear_cmd);
 }
+
+TEST(Volume, ProvisionedLength)
+{
+	
+	char path[] = "test.provisioned_length";
+	char clear_cmd[64];
+	sprintf(clear_cmd, "rm -rf %s", path);
+	system(clear_cmd);
+
+	const int dsize = 3000;
+	std::unique_ptr<char[]> _buff(new char[dsize]);
+	char *buff = _buff.get();
+	memset(buff, '1', dsize);
+
+	Volume *vol = new Volume(path, 10);
+	vol->pwrite(buff, dsize, 0UL);
+	EXPECT_EQ(dsize, vol->getProvisionedLength());
+	delete vol;
+
+	vol = new Volume(path, 10);
+	EXPECT_EQ(dsize, vol->getProvisionedLength());
+	delete vol;
+}
+
 
 int main(int argc, char *argv[])
 {
