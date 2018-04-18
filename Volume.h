@@ -41,15 +41,14 @@ private:
 	std::string path_;
 	std::mutex write_mtx_;			// serialize all write operations, protect size_ and curr_file_
 	
-	std::mutex pool_mtx_;
+	std::mutex fmtx_;
 	std::map<uint64_t, std::shared_ptr<VolumeFile> > fmap_;
 	std::list<uint64_t> flist_;
 
 private:
 	std::string offsetToPathfile(uint64_t offset);
-	void evictFileLocked();
-	void rotateFile();
-	std::shared_ptr<VolumeFile> getFile(uint64_t offset);
+	void evictFileWithLock();
+	std::shared_ptr<VolumeFile> getFile(uint64_t offset, uint64_t *start, uint64_t *end);
 
 public:
 	Volume(const char *path);
@@ -59,7 +58,6 @@ public:
 	void flush();
 	void pwrite(const void *buff, int32_t len, uint64_t offset);
 	void pread(void *buff, int32_t len, uint64_t offset);
-
 };
 #endif
 

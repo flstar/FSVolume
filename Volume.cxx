@@ -82,7 +82,9 @@ void VolumeFile::pread(void *buff, int len, uint64_t offset)
 			}
 		}
 		else if (ret == 0) {
-			THROW_EXCEPTION(-1, "No more data in volume file %s", fn_.c_str());
+			// fill 0s for non-existing data
+			memset(buff, 0x00, len);
+			ret = len;
 		}
 
 		offset += ret;
@@ -169,11 +171,11 @@ Volume::Volume(const char *path)
 			if (ret != 0) {
 				THROW_EXCEPTION(errno, "Failed to create volume directory %s", path);
 			}
-			size_ = 0UL;
 		}
 		else {
 			THROW_EXCEPTION(errno, "Failed to stat volume directory %s", path);
 		}
+		fmap_[0UL] = nullptr;
 	}
 
 	else if (!S_ISDIR(statbuf.st_mode)) {
@@ -201,23 +203,13 @@ Volume::Volume(const char *path)
 		THROW_EXCEPTION(errno, "Failed to scan volume directory %s", path);
 	}
 	closedir(dirp);
-
-	fmap_[0UL] = nullptr;
-	// Open last file as curr_file_
-	auto rit = fmap_.rbegin();
-	std::string fn = offsetToPathfile(rit->first);
-	std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
-
-	flist_.push_back(rit->first);
-	fmap_[rit->first] = f;
-	curr_file_ = f;
 }
 
 Volume::~Volume()
 {
 }
 
-void Volume::evictFileLocked()
+void Volume::evictFileWithLock()
 {
 	if (flist_.size() < FILE_POOL_SIZE) {
 		return;
@@ -244,96 +236,61 @@ void Volume::evictFileLocked()
 	return;
 }
 
-std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset)
+std::shared_ptr<VolumeFile> Volume::getFile(uint64_t offset, uint64_t *start, uint64_t *end)
 {
-	std::unique_lock<std::mutex> _lck(pool_mtx_);
+	std::unique_lock<std::mutex> _flck(fmtx_);
 
 	auto riter = fmap_.rbegin();
-	if (offset - (riter->first) >= FILE_SIZE) {
-		// If offset is beyond current head file, create a new file for it
-		evictFileLocked();
+	if (offset >= riter->first + FILE_SIZE) {
+		// If offset is beyond the range of last file, create a new file
+		evictFileWithLock();
 		std::string fn = offsetToPathfile(offset);
 		std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
 		flist_.push_back(offset & FILE_START_MASK);
 		fmap_[offset & FILE_START_MASK] = f;
-		return f;
 	}
 
 	// search for matching file
 	auto iter = fmap_.upper_bound(offset);
 	-- iter;
-	if (iter->second != nullptr) {
-		// if file has been opened, return it
-		flist_.remove(iter->first);
-		flist_.push_back(iter->first);
-		return iter->second;
+	uint64_t start_offset = iter->first;
+	uint64_t end_offset = start_offset + FILE_SIZE;
+	++ iter;
+	if (iter != fmap_.end()) {
+		end_offset = iter->first;
 	}
-
-	// Open the file
-	evictFileLocked();
-	std::string fn = offsetToPathfile(iter->first);
-	std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
-	flist_.push_back(iter->first);
-	fmap_[iter->first] = f;
-	return f;
-}
-
-uint64_t Volume::size()
-{
-	std::unique_lock<std::mutex> _lck(write_mtx_);
-	return size_;
-}
-
-void Volume::rotateFile()
-{
-	assert((size_ & FILE_OFFSET_MASK) == 0);
+	-- iter;
 	
-	std::unique_lock<std::mutex> _lck(pool_mtx_);
-
-	evictFileLocked();
-
-	std::string fn = offsetToPathfile(size_);
-	std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
-
-	flist_.push_back(size_);
-	fmap_[size_] = f;
-	curr_file_ = f;
-}
-
-void Volume::append(const void *buff, int32_t len)
-{
-	std::unique_lock<std::mutex> _lck(write_mtx_);
-
-	while (len > 0) {
-		uint64_t curr_offset = size_ & FILE_OFFSET_MASK;
-		uint64_t minlen = std::min(FILE_SIZE - curr_offset, uint64_t(len));
-
-		curr_file_->write(buff, minlen);
-		size_ += minlen;
-		len -= minlen;
-		buff = (char *)buff + minlen;
-		
-		// If data segment cross the border of files, rotate to next file and continue writing
-		if (len > 0) {
-			rotateFile();
-		}
+	// If choosen file it not opened yet, open it
+	if (iter->second == nullptr) {
+		evictFileWithLock();
+		std::string fn = offsetToPathfile(iter->first);
+		std::shared_ptr<VolumeFile> f(new VolumeFile(fn.c_str()));
+		flist_.push_back(iter->first);
+		fmap_[iter->first] = f;
 	}
-	return;
+
+	// return
+	if (start != nullptr) {
+		*start = start_offset;
+	}
+	if (end != nullptr) {
+		*end = end_offset;
+	}
+	return fmap_[start_offset];
 }
 
 void Volume::pwrite(const void *buff, int32_t len, uint64_t offset)
 {
-	// We are not going to deal with writing beyond the end of volume
-	assert(offset + len <= size_);
-	
-	std::unique_lock<std::mutex> _lck(write_mtx_);
+	std::unique_lock<std::mutex> _wlck(write_mtx_);
 
 	while (len > 0) {
-		std::shared_ptr<VolumeFile> f = getFile(offset);
-		uint64_t in_offset = offset & FILE_OFFSET_MASK;
-		uint64_t minlen = std::min(FILE_SIZE - in_offset, uint64_t(len));
+		uint64_t start = 0UL, end = 0UL;
+		std::shared_ptr<VolumeFile> f = getFile(offset, &start, &end);
+		uint64_t in_offset = offset - start;
+		uint64_t minlen = std::min(end - offset, uint64_t(len));
 
-		f->pwrite(buff, int32_t(minlen), offset);
+		f->pwrite(buff, int32_t(minlen), in_offset);
 		offset += minlen;
 		len -= minlen;
 		buff = (char *)buff + minlen;
@@ -344,13 +301,11 @@ void Volume::pwrite(const void *buff, int32_t len, uint64_t offset)
 
 void Volume::pread(void *buff, int32_t len, uint64_t offset)
 {
-	// We are not going to deal with reading beyond the end of volume
-	assert(offset + len <= size_);
-
 	while (len > 0) {
-		std::shared_ptr<VolumeFile> f = getFile(offset);
-		uint64_t in_offset = offset & FILE_OFFSET_MASK;
-		uint64_t minlen = std::min(FILE_SIZE - in_offset, uint64_t(len));
+		uint64_t start = 0UL, end = 0UL;
+		std::shared_ptr<VolumeFile> f = getFile(offset, &start, &end);
+		uint64_t in_offset = offset - start;
+		uint64_t minlen = std::min(end - offset, uint64_t(len));
 
 		f->pread(buff, int32_t(minlen), in_offset);
 		offset += minlen;
@@ -369,34 +324,6 @@ void Volume::flush()
 		f->flush();
 	}
 	return;
-}
-
-void Volume::truncate(uint64_t length)
-{
-	// We are not going to deal with truncating to a longer length
-	assert(length <= size_);
-	
-	std::unique_lock<std::mutex> _lck(write_mtx_);
-	
-	while (size_ > length) {
-		if ((size_ & FILE_START_MASK) != (length & FILE_START_MASK)) {
-			// Different files, delete current file
-			std::string fn = offsetToPathfile(size_);
-			VolumeFile::unlink(fn.c_str());
-			// Delete possible cached file handler
-			std::unique_lock<std::mutex> _lck2(pool_mtx_);
-			fmap_.erase(size_ & FILE_START_MASK);
-			flist_.remove(size_ & FILE_START_MASK);
-			size_ = (size_ & FILE_START_MASK) - 1;
-		}
-		else {
-			// Reach the new last file
-			curr_file_ = getFile(length);
-			curr_file_->truncate(length & FILE_OFFSET_MASK);
-			curr_file_->seek(length & FILE_OFFSET_MASK);
-			size_ = length;
-		}
-	}
 }
 
 #undef STATIC
