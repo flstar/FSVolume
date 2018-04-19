@@ -100,7 +100,7 @@ TEST(Volume, ProvisionedLength)
 
 TEST(Volume, Truncate)
 {
-	char path[] = "test.provisioned_length";
+	char path[] = "test.truncate";
 	char clear_cmd[64];
 	sprintf(clear_cmd, "rm -rf %s", path);
 	system(clear_cmd);
@@ -124,6 +124,7 @@ TEST(Volume, Truncate)
 	EXPECT_EQ(1024, vol->getProvisionedLength());
 
 	delete vol;
+	system(clear_cmd);
 }
 
 int main(int argc, char *argv[])
