@@ -230,12 +230,12 @@ void Volume::evictFileWithLock()
 
 	int counter = 0;
 	while (counter == 0) {
-		for (auto iter = flist_.begin(); iter != flist_.end() && counter < 8; iter++) {
-			uint64_t offset = *iter;
+		for (auto iter = flist_.begin(); iter != flist_.end() && counter < 8; ) {
+			uint64_t offset = *(iter++);
 			std::shared_ptr<VolumeFile> f = fmap_[offset];
 			if (f.use_count() <= 2) {
 				// Only referred by fmap_ and f
-				fmap_[offset].reset();
+				fmap_.erase(offset);
 				flist_.remove(offset);
 				f.reset();
 				++ counter;
@@ -314,6 +314,28 @@ void Volume::sync()
 		std::shared_ptr<VolumeFile> f = mapiter->second;
 		f->sync();
 	}
+	return;
+}
+
+void Volume::truncate(uint64_t length)
+{
+	std::unique_lock<std::mutex> _wlck(write_mtx_);
+
+	uint64_t start = length & FILE_START_MASK;
+	uint64_t end = provisioned_length_ & FILE_START_MASK;
+	while (end > start) {
+		std::unique_lock<std::mutex> _flck(fmtx_);
+		fmap_.erase(end);
+		flist_.remove(end);
+		VolumeFile::unlink(offsetToPathfile(end).c_str());
+		end -= FILE_SIZE;
+	}
+
+	uint64_t in_offset = length & FILE_OFFSET_MASK;
+	std::shared_ptr<VolumeFile> f = getFile(length);
+	f->truncate(in_offset);
+	provisioned_length_ = length;
+	
 	return;
 }
 

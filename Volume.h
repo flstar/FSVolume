@@ -61,6 +61,7 @@ public:
 	void pwrite(const void *buff, int32_t len, uint64_t offset);
 	void pread(void *buff, int32_t len, uint64_t offset);
 	void sync();
+	void truncate(uint64_t length);
 
 	uint64_t getProvisionedLength() { return provisioned_length_; }
 };

@@ -88,7 +88,7 @@ TEST(Volume, ProvisionedLength)
 	char *buff = _buff.get();
 	memset(buff, '1', dsize);
 
-	Volume *vol = new Volume(path, 10);
+	Volume *vol = new Volume(path, 10, 2);
 	vol->pwrite(buff, dsize, 0UL);
 	EXPECT_EQ(dsize, vol->getProvisionedLength());
 	delete vol;
@@ -98,6 +98,33 @@ TEST(Volume, ProvisionedLength)
 	delete vol;
 }
 
+TEST(Volume, Truncate)
+{
+	char path[] = "test.provisioned_length";
+	char clear_cmd[64];
+	sprintf(clear_cmd, "rm -rf %s", path);
+	system(clear_cmd);
+
+	const int dsize = 3000;
+	std::unique_ptr<char[]> _buff(new char[dsize]);
+	char *buff = _buff.get();
+	memset(buff, '1', dsize);
+
+	Volume *vol = new Volume(path, 10, 2);
+	vol->pwrite(buff, dsize, 0UL);
+	EXPECT_EQ(dsize, vol->getProvisionedLength());
+
+	vol->truncate(2000);
+	EXPECT_EQ(2000, vol->getProvisionedLength());
+
+	vol->truncate(1024);
+	EXPECT_EQ(1024, vol->getProvisionedLength());
+
+	vol->truncate(1024);
+	EXPECT_EQ(1024, vol->getProvisionedLength());
+
+	delete vol;
+}
 
 int main(int argc, char *argv[])
 {
